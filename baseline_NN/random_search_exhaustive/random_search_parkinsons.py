@@ -10,20 +10,34 @@ import multiprocessing as mp
 from multiprocessing.pool import ThreadPool
 
 from sklearn.model_selection import KFold
+from sklearn.model_selection import train_test_split
+import itertools
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import tensorflow as tf
 import logging
 
 tf.get_logger().setLevel(logging.ERROR)
 from tensorflow.keras.layers import *
+# print(f'version = {tf.__version__}')
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from tensorflow.keras.layers import Input, Dense
 from tensorflow.keras import Model, backend
 from sklearn.metrics import explained_variance_score, r2_score
+# from tensorflow.keras.utils.layer_utils import count_params
+import sys
+import subprocess
+from subprocess import PIPE
+
+# gpus = tf.config.list_physical_devices('GPU')
+# gpu_device = gpus[0]
+# core_config = tf.config.experimental.set_visible_devices(gpu_device, 'GPU')
+# tf.config.experimental.set_memory_growth(gpu_device, True)
+# tf.compat.v1.keras.backend.set_session(tf.compat.v1.Session(config=core_config))
 
 USE_GPU = True
 if USE_GPU:
-    device_idx = 0
+    device_idx = int(sys.argv[2])
     gpus = tf.config.list_physical_devices('GPU')
     gpu_device = gpus[device_idx]
     core_config = tf.config.experimental.set_visible_devices(gpu_device, 'GPU')
@@ -31,6 +45,27 @@ if USE_GPU:
     tf.compat.v1.keras.backend.set_session(tf.compat.v1.Session(config=core_config))
 else:
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+
+class NoDaemonProcess(mp.Process):
+    # make 'daemon' attribute always return False
+    def _get_daemon(self):
+        return False
+
+    def _set_daemon(self, value):
+        pass
+
+    daemon = property(_get_daemon, _set_daemon)
+
+
+# sub-class multiprocessing.pool.Pool instead of multiprocessing.Pool
+# because the latter is only a wrapper function, not a proper class.
+class MyPool(mp.pool.Pool):
+    Process = NoDaemonProcess
+
+
+'''Task Grouping Predictor Functions'''
+
 
 def Data_Prep(school_data):
     school_data_arr = np.array(school_data, dtype=float)
@@ -46,6 +81,7 @@ def Data_Prep(school_data):
     Sample_Label = np.zeros((Number_of_Records, len(Target_Features)))
     for t in range(Number_of_Records):
         Sample_Label[t] = school_data_arr[t, Number_of_Features - len(Target_Features):]
+    # print(Sample_Label[0])
 
     return Sample_Inputs, Sample_Label, len(Input_Features)
 
@@ -53,9 +89,13 @@ def Data_Prep(school_data):
 def readData(TASKS):
     data_param_dictionary = {}
     for subj_id in TASKS:
-        csv = (f"{DataPath}DATA/parkinsons_subject_{subj_id}_for_MTL.csv")
-        df = pd.read_csv(csv, low_memory=False)
+        # csv = (f"{DataPath}DATA/parkinsons_subject_{subj_id}_for_MTL.csv")
+        # csv = (f"{DataPath}DATA/parkinsons_subject_{subj_id}_for_MTL.csv")
+        csv = (f"{DataPath}parkinsons_subject_{subj_id}.csv")
 
+        df = pd.read_csv(csv, low_memory=False)
+        # print(df.columns)
+        # exit(0)
 
         df = df[[
             # 'age', 'sex', 'test_time',
@@ -64,6 +104,7 @@ def readData(TASKS):
             'Shimmer:DDA', 'NHR', 'HNR', 'RPDE', 'DFA', 'PPE',
             'motor_UPDRS', 'total_UPDRS']]
 
+        print(np.shape(df))
 
         target1 = list(df.pop('motor_UPDRS'))
         target2 = list(df.pop('total_UPDRS'))
@@ -88,10 +129,20 @@ def readData(TASKS):
         '''*********************************'''
     return data_param_dictionary, Number_of_Features
 
+
+'''MTL for Task Groups Functions'''
+
+
 def kFold_validation(current_task_specific_architecture, current_shared_architecture, task, group_no, random_seed):
+    # print(f'task = {task}')
+
     data_param_dictionary, Number_of_Features_FF = readData(task)
 
     data_param_dict_for_specific_task = {}
+    if datasetName == 'Parkinsons':
+        max_size = 170
+        train_set_size = math.floor(max_size * (1 - num_folds / 100))
+        test_set_size = math.ceil(max_size * (num_folds / 100))
 
     for f in range(num_folds):
         data_param_dict_for_specific_task[f] = {}
@@ -99,6 +150,8 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
     for subj_id in task:
         Sample_Inputs = data_param_dictionary[f'Subject_{subj_id}_FF_Inputs']
         Sample_Label = data_param_dictionary[f'Subject_{subj_id}_Label']
+        Sample_Label_target_1 = data_param_dictionary[f'Subject_{subj_id}_Label_1']
+        Sample_Label_target_2 = data_param_dictionary[f'Subject_{subj_id}_Label_2']
         kfold = KFold(n_splits=num_folds, shuffle=True, random_state=random_seed)
 
         fold = 0
@@ -107,6 +160,19 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
             X_test = Sample_Inputs[test]
             y_train = Sample_Label[train]
             y_test = Sample_Label[test]
+            samples_to_be_repeated = train_set_size - len(X_train)
+            # print(f'samples_to_be_repeated = {samples_to_be_repeated}')
+            if samples_to_be_repeated > 0:
+                random_indices = np.random.choice(X_train.shape[0], samples_to_be_repeated)
+                X_train = np.concatenate((X_train, X_train[random_indices]), axis=0)
+                y_train = np.concatenate((y_train, y_train[random_indices]), axis=0)
+
+            samples_to_be_repeated = test_set_size - len(X_test)
+            # print(f'samples_to_be_repeated = {samples_to_be_repeated}')
+            if samples_to_be_repeated > 0:
+                random_indices = np.random.choice(X_test.shape[0], samples_to_be_repeated)
+                X_test = np.concatenate((X_test, X_test[random_indices]), axis=0)
+                y_test = np.concatenate((y_test, y_test[random_indices]), axis=0)
 
             data_param_dict_for_specific_task[f'Subject_{subj_id}_fold_{fold}_X_train'] = X_train
             data_param_dict_for_specific_task[f'Subject_{subj_id}_fold_{fold}_X_test'] = X_test
@@ -129,8 +195,12 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
     number_of_models = 5
     current_idx = random.sample(range(len(ALL_FOLDS)), number_of_models)
     args = [ALL_FOLDS[index] for index in sorted(current_idx)]
-
+    number_of_pools = len(args)
     timeStart = time.time()
+
+    # pool = mp.Pool(number_of_pools)
+    # all_scores = np.array(pool.starmap(final_model, args))
+    # pool.close()
     with ThreadPool(20) as tp:
         all_scores = tp.starmap(final_model, args)
     tp.join()
@@ -171,14 +241,23 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
     for t, MSE_list in score_param_per_task_group_per_fold.items():
         total_loss_per_task_group_per_fold += np.mean(MSE_list)
 
-    return total_loss_per_task_group_per_fold
+    task_specific_scores = {}
+    for key in score_param_per_task_group_per_fold.keys():
+        task_specific_scores.update({key: np.mean(score_param_per_task_group_per_fold[key])})
+
+    # return total_loss_per_task_group_per_fold, np.mean(explained_var), np.mean(
+    #     r_square)
+    return total_loss_per_task_group_per_fold, task_specific_scores
 
 
 def final_model(task_hyperparameters, shared_hyperparameters, task_group_list, data_param_dict_for_specific_task,
                 Number_of_Features, fold, group_no):
     data_param = copy.deepcopy(data_param_dict_for_specific_task)
+    print(f'task_group_list = {task_group_list}')
 
-    filepath = f'SavedModels/RS_Parkinsons_Group_{group_no}_{fold}.h5'
+    # filepath = f'SavedModels/Parkinsons_group_{group_no}_{fold}.h5'
+
+    filepath = f'SavedModels/RS_{datasetName}_Group_{group_no}_{fold}.h5'
     MTL_model_param = {}
     shared_module_param_FF = {}
 
@@ -235,6 +314,11 @@ def final_model(task_hyperparameters, shared_hyperparameters, task_group_list, d
         output_layers.append(outputlayer)
 
     finalModel = Model(inputs=input_layers, outputs=output_layers)
+
+    # from keras.utils.layer_utils import count_params
+    # trainable_count = count_params(finalModel.trainable_weights)
+    # print(f'fold = {fold}\tMTL = {len(MTL_model_param.keys())}\t trainable_count = {trainable_count}')
+
     opt = tf.keras.optimizers.Adam(learning_rate=shared_hyperparameters['learning_rate'])
     finalModel.compile(optimizer=opt, loss='mse')
 
@@ -267,10 +351,29 @@ def final_model(task_hyperparameters, shared_hyperparameters, task_group_list, d
     explained_var = np.mean(tmp_explained_var)
     r_square = np.mean(tmp_R_square)
 
+    print(f'fold = {fold}\t explained_var = {explained_var}\t r_square = {r_square}')
+
     if os.path.exists(filepath):
         os.remove(os.path.join(filepath))
 
     return scores, explained_var, r_square
+
+
+def random_task_grouping(task_Set, min_task_groups):
+    task_group = {}
+    total_dataset = len(task_Set)
+
+    group = 0
+    while total_dataset > 0 and min_task_groups > 0:
+        team = random.sample(task_Set, int(total_dataset / min_task_groups))
+        task_group.update({group: team})
+        group += 1
+        for x in team:
+            task_Set.remove(x)
+        total_dataset -= int(total_dataset / min_task_groups)
+        min_task_groups -= 1
+
+    return task_group
 
 
 def prep_task_specific_arch(current_task_group):
@@ -289,7 +392,144 @@ def prep_task_specific_arch(current_task_group):
     return TASK_Specific_Arch
 
 
+def mutate_groups(new_task_group, new_group_score):
+    task_rand = random.sample(TASKS, 1)
+    task_rand = task_rand[0]
+    changed_group = []
+
+    # find out old group
+    for key, task_list in new_task_group.items():
+        if task_rand in task_list:
+            g_old = key
+
+    # check if old group is empty->delete the old group and assign task to new group
+    print(f'task_rand = {task_rand}\tg_old = {g_old}\tTask-Group = {new_task_group}')
+
+    if len(new_task_group[g_old]) == 1:
+        del new_task_group[g_old]
+        del new_group_score[g_old]
+        g_new = random.choice(list(new_task_group.keys()))
+        new_task_group[g_new].append(task_rand)
+        changed_group.append(g_new)
+
+    else:
+        new_task_group[g_old].remove(task_rand)
+        g_new = random.choice([g for g in range(len(new_task_group) + 1) if g != g_old])
+
+        if g_new not in new_task_group.keys():
+            new_task_group.update({g_new: list([task_rand])})
+        else:
+            new_task_group[g_new].append(task_rand)
+        changed_group = [g_old, g_new]
+
+        # new_grouping_sorted = tuple(sorted(new_task_group[g_new]))
+        # old_grouping_sorted = tuple(sorted(new_task_group[g_old]))
+        #
+        # if old_grouping_sorted not in Prev_Groups.keys():
+        #     changed_group.append(g_old)
+        #     if g_old not in new_group_score.keys():
+        #         new_group_score.update({g_old: 0})
+        #
+        # if new_grouping_sorted not in Prev_Groups.keys():
+        #     changed_group.append(g_new)
+        #     if g_new not in new_group_score.keys():
+        #         new_group_score.update({g_new: 0})
+
+    return changed_group, task_rand
+
+
+# def Initial_Training(k):
+#     Task_group = []
+#     Total_Loss = []
+#     Individual_Group_Score = []
+#     Number_of_Groups = []
+#     Individual_Explained_Variance = []
+#     Individual_RSquare = []
+#
+#     # TASK_Clusters = pd.read_csv(f'../Pairwise_Affinity/Clusters.csv')
+#     # TASK_Group = list(TASK_Clusters.TASK_Group)
+#
+#     Prev_Groups = {}
+#     # for count in range(0, len(TASK_Group)):
+#     for count in range(0, k):
+#         min_task_groups = random.randint(5, 12)
+#         print(f'Initial Training for {datasetName}-partition {count}')
+#         task_Set = copy.deepcopy(TASKS)
+#         task_group = random_task_grouping(task_Set, min_task_groups)
+#         # task_group = TASK_Group[count]
+#         # task_group = ast.literal_eval(task_group)
+#         print(f'task_group = {task_group}')
+#
+#         TASK_Specific_Arch = prep_task_specific_arch(task_group)
+#         random_seed = random.randint(0, 100)
+#
+#         args_tasks = []
+#         group_score = {}
+#         tot_loss = 0
+#         group_avg_EV = {}
+#         group_avg_Rsq = {}
+#
+#         for group_no, task in task_group.items():
+#             group_score.update({group_no: 0})
+#             group_avg_EV.update({group_no: 0})
+#             group_avg_Rsq.update({group_no: 0})
+#
+#             grouping_sorted = tuple(sorted(task))
+#
+#             if grouping_sorted not in Prev_Groups.keys():
+#                 if len(task) == 1:
+#                     loss = Single_res_dict[task[0]]
+#                     avg_EV = STL_EV[task[0]]
+#                     r_square = STL_Rsq[task[0]]
+#                 else:
+#                     tmp = (TASK_Specific_Arch[group_no], initial_shared_architecture, task, group_no, random_seed)
+#                     args_tasks.append(tmp)
+#
+#                     loss, avg_EV, r_square = kFold_validation(*tmp)
+#
+#                 tot_loss += loss
+#                 group_score[group_no] = loss
+#                 group_avg_EV[group_no] = avg_EV
+#                 group_avg_Rsq[group_no] = r_square
+#                 Prev_Groups[grouping_sorted] = (loss, avg_EV, r_square)
+#             else:
+#                 loss, avg_EV, r_square = Prev_Groups[grouping_sorted]
+#                 if group_no not in group_score.keys():
+#                     group_score.update({group_no: loss})
+#                     group_avg_EV.update({group_no: avg_EV})
+#                     group_avg_Rsq.update({group_no: r_square})
+#                 else:
+#                     group_score[group_no] = loss
+#                     group_avg_EV[group_no] = avg_EV
+#                     group_avg_Rsq[group_no] = r_square
+#                 tot_loss += loss
+#
+#         print(f'tot_loss = {tot_loss}')
+#         print(f'group_score = {group_score}')
+#         Task_group.append(task_group)
+#         Number_of_Groups.append(len(task_group))
+#         Total_Loss.append(tot_loss)
+#         Individual_Group_Score.append(group_score.copy())
+#         print(Individual_Group_Score)
+#         Individual_Explained_Variance.append(group_avg_EV.copy())
+#         Individual_RSquare.append(group_avg_Rsq.copy())
+#         # print(f'tot_loss = {tot_loss}')
+#
+#     print(len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score))
+#     initial_results = pd.DataFrame({'Total_Loss': Total_Loss,
+#                                     'Number_of_Groups': Number_of_Groups,
+#                                     'Task_group': Task_group,
+#                                     'Individual_Group_Score': Individual_Group_Score,
+#                                     'Individual_Explained_Variance': Individual_Explained_Variance,
+#                                     'Individual_RSquare': Individual_RSquare})
+#     initial_results.to_csv(f'{ResultPath}/{datasetName}_Initial_Task_Grouping_Results.csv',
+#                            index=False)
+#
+
 if __name__ == '__main__':
+
+    import sys
+    V = int(sys.argv[1])
 
     num_folds = 10
     initial_shared_architecture = {'adaptive_FF_neurons': 4, 'shared_FF_Layers': 1, 'shared_FF_Neurons': [12],
@@ -305,12 +545,18 @@ if __name__ == '__main__':
     STL_Rsq = {}
 
     datasetName = 'Parkinsons'
-    DataPath = f'../../Dataset/{datasetName.upper()}/'
-    ResultPath = '../../Results/'
+    DataPath = f'../Dataset/{datasetName.upper()}/'
+    ResultPath = '../Results/'
+
+    # gpus = tf.config.list_physical_devices('GPU')
+    # gpu_device = gpus[1]
+    # core_config = tf.config.experimental.set_visible_devices(gpu_device, 'GPU')
+    # tf.config.experimental.set_memory_growth(gpu_device, True)
+    # tf.compat.v1.keras.backend.set_session(tf.compat.v1.Session(config=core_config))
 
     task_info = pd.read_csv(f'{DataPath}Task_Information_{datasetName}.csv')
-    single_results = pd.read_csv(f'{ResultPath}STL/STL_{datasetName}_NN.csv')
-    pair_results = pd.read_csv(f'{ResultPath}Pairwise/NN/{datasetName}_Results_from_Pairwise_Training_ALL_NN.csv')
+    pair_results = pd.read_csv(f'{ResultPath}/{datasetName}_Results_from_Pairwise_Training_ALL_NN.csv')
+    single_results = pd.read_csv(f'{ResultPath}/SingleTaskTraining_{datasetName}_FF_sigmoid.csv')
 
     TASKS = [i for i in range(1, 43)]
 
@@ -326,6 +572,7 @@ if __name__ == '__main__':
         STL_Rsq.update({Selected_Task: single_res.R_Square[0]})
 
     Pairwise_res_dict = {}
+    Pairwise_res_dict_indiv = {}
     PTL_EV = {}
     PTL_Rsq = {}
     Task1 = list(pair_results.Task_1)
@@ -335,27 +582,60 @@ if __name__ == '__main__':
         task1 = p[0]
         task2 = p[1]
         pair_res = pair_results[(pair_results.Task_1 == task1) & (pair_results.Task_2 == task2)].reset_index()
+
+        if task1 == pair_res.Task_1[0]:
+            Pairwise_res_dict_indiv.update({p: {f'sub_{task1}': pair_res.Individual_loss_Task_1[0],
+                                                f'sub_{task2}': pair_res.Individual_loss_Task_2[0]}})
+        else:
+            Pairwise_res_dict_indiv.update({p: {f'sub_{task1}': pair_res.Individual_loss_Task_2[0],
+                                                f'sub_{task2}': pair_res.Individual_loss_Task_1[0]}})
+
         Pairwise_res_dict.update({p: pair_res.Total_Loss[0]})
         PTL_EV.update({p: pair_res.Explained_Var[0]})
         PTL_Rsq.update({p: pair_res.R_Square[0]})
 
+    previously_trained = pd.read_csv(f'{datasetName}_previously_trained_groups.csv')
+    previously_trained_groups = previously_trained['previously_trained_groups'].tolist()
+    previously_trained_groups_loss = previously_trained['previously_trained_groups_loss'].tolist()
+    for i, group in enumerate(previously_trained_groups):
+        previously_trained_groups[i] = ast.literal_eval(group)
+    ''''''
+    switch_architecture = ['ACCEPT', 'REJECT']
+    k = 20
+    # Initial_Training(k)
 
-    run = 1
+    Type = 'WeightMatrix'
+    # ClusterType = 'Hierarchical'
+    ClusterType = 'KMeans'
+    run = 2
+    # mtls_for_clusters(Type)
     Task_group = []
     Total_Loss = []
     Individual_Group_Score = []
     Number_of_Groups = []
     Individual_Explained_Variance = []
     Individual_RSquare = []
+    Individual_Task_Score = []
 
+    # temp_res = pd.read_csv(
+    #     f'../Groupwise_Affinity/{datasetName}_MTL_Results_for_Hierarchical_Clusters_NonNegative_40.csv')
 
-    partition_data = pd.read_csv(f'{datasetName}_OnlyGroups_URS.csv')
-    TASK_Group = list(partition_data.Task_group)
+    # Total_Loss = list(temp_res['Total_Loss'])
+    # Number_of_Groups = list(temp_res['Number_of_Groups'])
+    # Individual_Group_Score = list(temp_res['Individual_Group_Score'])
+    # Individual_Explained_Variance = list(temp_res['Individual_Explained_Variance'])
+    # Individual_RSquare = list(temp_res['Individual_RSquare'])
+
+    partition_data = pd.read_csv(f'{datasetName}_Random_Task_Groups.csv')
+    TASK_Group = list(partition_data.Task_Groups)
 
     Prev_Groups = {}
+    # TASK_Group = [{0: TASKS}]
+    for count in range(V, V+200):
+    # for count in range(len(TASK_Group)):
+        print(f'Initial Training for {datasetName}-partition {count}\n'
+              f'task_group = {TASK_Group[count]}')
 
-    for count in range(len(TASK_Group)):
-        print(f'Initial Training for {datasetName}-partition {count}')
         task_group = TASK_Group[count]
         task_group = ast.literal_eval(task_group)
 
@@ -365,6 +645,7 @@ if __name__ == '__main__':
         group_score = {}
         group_avg_EV = {}
         group_avg_R2 = {}
+        tmp_task_score = []
         tot_loss = 0
         for group_no, task in task_group.items():
             group_score.update({group_no: 0})
@@ -374,44 +655,61 @@ if __name__ == '__main__':
             if grouping_sorted not in Prev_Groups.keys():
                 if len(task) == 1:
                     loss = Single_res_dict[task[0]]
+                    task_scores = {f'sub_{task[0]}': Single_res_dict[task[0]]}
+
                 elif len(task) == 2:
                     loss = Pairwise_res_dict[grouping_sorted]
+                    task_scores = copy.deepcopy(Pairwise_res_dict_indiv[grouping_sorted])
+
                 else:
                     tmp = (TASK_Specific_Arch[group_no], initial_shared_architecture, task, group_no, random_seed)
-                    loss = kFold_validation(*tmp)
+                    loss, task_scores = kFold_validation(*tmp)
+
                 tot_loss += loss
                 group_score[group_no] = loss
-                Prev_Groups[grouping_sorted] = loss
+                tmp_task_score.append(copy.deepcopy(task_scores))
+                Prev_Groups[grouping_sorted] = (loss, copy.deepcopy(task_scores))
 
             else:
-                loss = Prev_Groups[grouping_sorted]
+                loss,task_scores = Prev_Groups[grouping_sorted]
                 if group_no not in group_score.keys():
                     group_score.update({group_no: loss})
 
                 else:
                     group_score[group_no] = loss
-                    # group_avg_EV[group_no] = EV
-                    # group_avg_R2[group_no] = Rsq
 
                 tot_loss += loss
+                tmp_task_score.append(copy.deepcopy(task_scores))
+            print(f'group_no = {group_no}\ttotal_loss = {loss}')
+
+        print(f'tot_loss = {tot_loss}')
 
         Task_group.append(task_group)
         Number_of_Groups.append(len(task_group))
         Total_Loss.append(tot_loss)
         Individual_Group_Score.append(group_score.copy())
-        print(len(TASK_Group), len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score))
-        if np.sum(Number_of_Groups)>=1000:
-            break
-        if len(Total_Loss) % 10 == 0:
+        Individual_Task_Score.append(tmp_task_score.copy())
+        # Individual_Explained_Variance.append(group_avg_EV.copy())
+        # Individual_RSquare.append(group_avg_R2.copy())
+        # print(Individual_Group_Score)
+        print(len(TASK_Group), len(Total_Loss), len(Number_of_Groups), len(Task_group),
+              len(Individual_Group_Score),len(Individual_Task_Score))
+
+        cut_off = 2
+        if len(Total_Loss) % cut_off == 0:
             temp_res = pd.DataFrame({'Total_Loss': Total_Loss,
                                      'Number_of_Groups': Number_of_Groups,
+                                        'Task_group': Task_group,
+                                     'Individual_Task_Score': Individual_Task_Score,
                                      'Individual_Group_Score': Individual_Group_Score,
+                                     # 'Individual_Explained_Variance': Individual_Explained_Variance,
+                                     # 'Individual_RSquare': Individual_RSquare
                                      })
-            temp_res.to_csv(f'{datasetName}_Random_Search_{len(Total_Loss)}_run_{run}.csv',
+            temp_res.to_csv(f'../Groupwise_Affinity/{datasetName}_Random_Search_{V+len(Total_Loss)}_run_{run}_v_{V}.csv',
                             index=False)
 
-            if len(Total_Loss) > 10:
-                old_file = f'{datasetName}_Random_Search_{len(Total_Loss)-10}_run_{run}.csv'
+            if len(Total_Loss) > cut_off:
+                old_file = f'../Groupwise_Affinity/{datasetName}_Random_Search_{V+len(Total_Loss)-cut_off}_run_{run}_v_{V}.csv'
                 if os.path.exists(old_file):
                     os.remove(os.path.join(old_file))
 
@@ -419,7 +717,12 @@ if __name__ == '__main__':
     initial_results = pd.DataFrame({'Total_Loss': Total_Loss,
                                     'Number_of_Groups': Number_of_Groups,
                                     'Task_group': Task_group,
+                                    'Individual_Task_Score': Individual_Task_Score,
                                     'Individual_Group_Score': Individual_Group_Score,
+                                    # 'Individual_Explained_Variance': Individual_Explained_Variance,
+                                    # 'Individual_RSquare': Individual_RSquare
                                     })
-    initial_results.to_csv(f'{datasetName}_Random_Search_{len(Total_Loss)}_run_{run}.csv',
+    initial_results.to_csv(f'{ResultPath}/{datasetName}_Random_Search_{len(Total_Loss)}_run_{run}_v_{V}.csv',
                            index=False)
+    # initial_results.to_csv(f'{ResultPath}/{datasetName}_SimpleMTL.csv',
+    #                        index=False)

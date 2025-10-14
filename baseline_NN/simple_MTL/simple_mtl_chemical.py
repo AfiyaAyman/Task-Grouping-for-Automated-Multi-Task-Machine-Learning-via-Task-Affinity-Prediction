@@ -8,12 +8,13 @@ import multiprocessing as mp
 from multiprocessing.pool import ThreadPool
 import ast
 from sklearn.metrics import average_precision_score
-from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.model_selection import KFold
 import tensorflow as tf
 from tensorflow.keras.layers import *
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.layers import Input, Dense
 from tensorflow.keras import Model
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # print(f'version = {tf.__version__}')
 
@@ -27,6 +28,7 @@ if USE_GPU:
     tf.compat.v1.keras.backend.set_session(tf.compat.v1.Session(config=core_config))
 else:
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 
 def readData(molecule_list):
     data_param_dictionary = {}
@@ -65,6 +67,8 @@ def SplitLabels(Target):
     for t in range(len(Target)):
         label_data[t] = Target[t][0]
     return label_data
+
+
 def Splitting_Values(Labels):
     Predicted = []
     for i in Labels:
@@ -72,28 +76,28 @@ def Splitting_Values(Labels):
             Predicted.append(j)
     return Predicted
 
+
 def kFold_validation(current_task_specific_architecture, current_shared_architecture, molecule_list, group_no,
                      random_seed):
     data_param_dictionary, Number_of_Features = readData(molecule_list)
 
     data_param_dict_for_specific_task = {}
     if datasetName == 'Chemical':
-        max_size = 2370 #MAX + plus 2
-        train_set_size = math.floor(max_size*(1-num_folds/100))
-        test_set_size = math.ceil(max_size*(num_folds/100))
+        max_size = 2370
+        train_set_size = math.floor(max_size * (1 - num_folds / 100))
+        test_set_size = math.ceil(max_size * (num_folds / 100))
 
     for molecule in molecule_list:
 
         Sample_Inputs = data_param_dictionary[f'Molecule_{molecule}_FF_Inputs']
         Sample_Label = data_param_dictionary[f'Molecule_{molecule}_Labels']
 
+        kfold = KFold(n_splits=num_folds, shuffle=True, random_state=random_seed)
 
         fold = 0
         ALL_FOLDS = []
 
-        kfold = StratifiedKFold(n_splits=num_folds, random_state=random_seed, shuffle=True)
-
-        for train, test in kfold.split(Sample_Inputs, Sample_Label):
+        for train, test in kfold.split(Sample_Inputs):
             X_train = Sample_Inputs[train]
             X_test = Sample_Inputs[test]
             y_train = Sample_Label[train]
@@ -116,6 +120,7 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
             y_train = SplitLabels(y_train)
             y_test = SplitLabels(y_test)
 
+            # print(f'fold = {fold}\tMolecule = {molecule}, X_train = {X_train.shape}\tX_test = {X_test.shape}\ty_train = {y_train.shape}\ty_test = {y_test.shape}')
             data_param_dict_for_specific_task.update({f'Molecule_{molecule}_fold_{fold}_X_train': X_train})
             data_param_dict_for_specific_task.update({f'Molecule_{molecule}_fold_{fold}_X_test': X_test})
 
@@ -129,8 +134,8 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
             ALL_FOLDS.append(tmp)
 
             fold += 1
-
-    number_of_models = 5
+    # exit(0)
+    number_of_models = 10
     current_idx = random.sample(range(len(ALL_FOLDS)), number_of_models)
     args = [ALL_FOLDS[index] for index in sorted(current_idx)]
 
@@ -138,7 +143,8 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
 
     # print(len(args))
 
-def sort_Res(all_scores,molecule_list):
+
+def sort_Res(all_scores, molecule_list):
     score_param_per_task_group_per_fold = {}
     error_param_per_task_group_per_fold = {}
     AP_param_per_task_group_per_fold = {}
@@ -189,123 +195,168 @@ def sort_Res(all_scores,molecule_list):
     avg_error = np.mean(errorRate)
     AP = np.mean(ap)
 
+    weight_dict = {}
+    for c in range(len(all_scores)):
+        for task_name, weight in all_scores[c][4].items():
+            if task_name not in weight_dict.keys():
+                weight_dict[task_name] = []
+                # print(f'weight = {weight}')
+            weight_dict[task_name].append(weight[0])
+    file = open("../weight_dict_Chemical.txt", "w")
+    file.write("" + repr(weight_dict) + "")
+    file.close()
+
     print(
         f'total_loss_per_task_group_per_fold = {total_loss_per_task_group_per_fold}\tavg_error = {avg_error}\tAP = {AP}')
 
     return total_loss_per_task_group_per_fold, task_specific_scores, avg_error, AP
 
+
 def final_model(task_hyperparameters, shared_hyperparameters, molecule_list, data_param_dict_for_specific_task,
                 Number_of_Features, fold, group_no):
+    filepath = f'SavedModels/simpleMTL_RS_{datasetName}_Group_{group_no}_{fold}.h5'
+    MTL_model_param = {}
+    input_layers = []
 
-        filepath = f'SavedModels/{v}_RS_{datasetName}_Group_{group_no}_{fold}.h5'
-        MTL_model_param = {}
-        input_layers = []
+    train_data = []
+    train_label = []
+    test_data = []
+    test_label = []
 
-        train_data = []
-        train_label = []
-        test_data = []
-        test_label = []
+    for molecule in molecule_list:
 
-        for molecule in molecule_list:
+        train_data.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_X_train'])
+        train_label.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_y_train'])
 
-            train_data.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_X_train'])
-            train_label.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_y_train'])
+        test_data.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_X_test'])
+        test_label.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_y_test'])
 
-            test_data.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_X_test'])
-            test_label.append(data_param_dict_for_specific_task[f'Molecule_{molecule}_fold_{fold}_y_test'])
+        hyperparameters = copy.deepcopy(task_hyperparameters[molecule])
+        Input_FF = tf.keras.layers.Input(shape=(Number_of_Features,))
+        input_layers.append(Input_FF)
 
-            hyperparameters = copy.deepcopy(task_hyperparameters[molecule])
-            Input_FF = tf.keras.layers.Input(shape=(Number_of_Features,))
-            input_layers.append(Input_FF)
+        MTL_model_param.update({f'molecule_{molecule}_Input_FF': Input_FF})
 
-            MTL_model_param.update({f'molecule_{molecule}_Input_FF': Input_FF})
+        if hyperparameters['preprocessing_FF_layers'] > 0:
+            hidden_ff = Dense(hyperparameters['preprocessing_FF_Neurons'][0], activation='relu')(Input_FF)
+            for h in range(1, hyperparameters['preprocessing_FF_layers']):
+                hidden_ff = Dense(hyperparameters['preprocessing_FF_Neurons'][h], activation='relu')(hidden_ff)
+            MTL_model_param.update({f'molecule_{molecule}_ff_preprocessing_model': hidden_ff})
 
-            if hyperparameters['preprocessing_FF_layers'] > 0:
-                hidden_ff = Dense(hyperparameters['preprocessing_FF_Neurons'][0], activation='relu')(Input_FF)
-                for h in range(1, hyperparameters['preprocessing_FF_layers']):
-                    hidden_ff = Dense(hyperparameters['preprocessing_FF_Neurons'][h], activation='relu')(hidden_ff)
-                MTL_model_param.update({f'molecule_{molecule}_ff_preprocessing_model': hidden_ff})
+    SHARED_module_param_FF = {}
 
-        SHARED_module_param_FF = {}
+    for h in range(0, shared_hyperparameters['shared_FF_Layers']):
+        shared_ff = tf.keras.layers.Dense(shared_hyperparameters['shared_FF_Neurons'][h], activation='relu')
+        SHARED_module_param_FF.update({f'FF_{h}': shared_ff})
 
-        for h in range(0, shared_hyperparameters['shared_FF_Layers']):
-            shared_ff = tf.keras.layers.Dense(shared_hyperparameters['shared_FF_Neurons'][h], activation='relu')
-            SHARED_module_param_FF.update({f'FF_{h}': shared_ff})
+    for molecule in molecule_list:
+        shared_FF = SHARED_module_param_FF['FF_0'](MTL_model_param[f'molecule_{molecule}_ff_preprocessing_model'])
+        for h in range(1, shared_hyperparameters['shared_FF_Layers']):
+            shared_FF = SHARED_module_param_FF[f'FF_{h}'](shared_FF)
 
-        for molecule in molecule_list:
-            shared_FF = SHARED_module_param_FF['FF_0'](MTL_model_param[f'molecule_{molecule}_ff_preprocessing_model'])
-            for h in range(1, shared_hyperparameters['shared_FF_Layers']):
-                shared_FF = SHARED_module_param_FF[f'FF_{h}'](shared_FF)
+        MTL_model_param.update({f'molecule_{molecule}_last_hidden_layer': shared_FF})
 
-            MTL_model_param.update({f'molecule_{molecule}_last_hidden_layer': shared_FF})
+    output_layers = []
 
-        output_layers = []
+    for molecule in molecule_list:
+        outputLayer = Dense(1, activation='sigmoid', name=f'Molecule_{molecule}')
 
-        for molecule in molecule_list:
-            outputLayer = Dense(1, activation='sigmoid', name=f'Molecule_{molecule}')
+        shared_model = Model(inputs=MTL_model_param[f'molecule_{molecule}_Input_FF'],
+                             outputs=MTL_model_param[f'molecule_{molecule}_last_hidden_layer'])
 
-            shared_model = Model(inputs=MTL_model_param[f'molecule_{molecule}_Input_FF'],
-                                 outputs=MTL_model_param[f'molecule_{molecule}_last_hidden_layer'])
+        combinedInput = concatenate([MTL_model_param[f'molecule_{molecule}_Input_FF'], shared_model.output])
+        output = outputLayer(combinedInput)
 
-            combinedInput = concatenate([MTL_model_param[f'molecule_{molecule}_Input_FF'], shared_model.output])
-            output = outputLayer(combinedInput)
+        output_layers.append(output)
 
-            output_layers.append(output)
+    # print(output_layers)
 
-        # print(output_layers)
+    finalModel = Model(inputs=input_layers, outputs=output_layers)
 
-        finalModel = Model(inputs=input_layers, outputs=output_layers)
+    # Compile model
 
-        # Compile model
+    opt = tf.keras.optimizers.Adam(learning_rate=shared_hyperparameters['learning_rate'])
+    finalModel.compile(optimizer=opt, loss='binary_crossentropy', metrics=['accuracy'])
 
-        opt = tf.keras.optimizers.Adam(learning_rate=shared_hyperparameters['learning_rate'])
-        finalModel.compile(optimizer=opt, loss='binary_crossentropy', metrics=['accuracy'])
+    checkpoint = ModelCheckpoint(filepath, verbose=0, monitor='val_loss', save_best_only=True, mode='auto')
+    number_of_epoch = 400
+    if len(molecule_list) > 10:
+        number_of_epoch = 800
+    history = finalModel.fit(x=train_data,
+                             y=tuple(train_label),
+                             shuffle=True,
+                             epochs=number_of_epoch,
+                             batch_size=264,
+                             validation_data=(test_data,
+                                              tuple(test_label)),
+                             callbacks=[checkpoint],
+                             verbose=0)
 
-        checkpoint = ModelCheckpoint(filepath, verbose=0, monitor='val_loss', save_best_only=True, mode='auto')
-        number_of_epoch = 400
-        if len(molecule_list)>10:
-            number_of_epoch = 800
-        history = finalModel.fit(x=train_data,
-                                 y=tuple(train_label),
-                                 shuffle=True,
-                                 epochs=number_of_epoch,
-                                 batch_size=264,
-                                 validation_data=(test_data,
-                                                  tuple(test_label)),
-                                 callbacks=[checkpoint],
-                                 verbose=0)
+    finalModel = tf.keras.models.load_model(filepath)
+    scores = finalModel.evaluate(tuple(test_data), tuple(test_label), verbose=0)
 
-        finalModel = tf.keras.models.load_model(filepath)
-        scores = finalModel.evaluate(tuple(test_data), tuple(test_label), verbose=0)
+    print("Weights and biases of the layers after training the model: \n")
+    for layer in finalModel.layers:
+        config = layer.get_config()
+        # print(layer.name)
+        if 'input' not in config['name'] and 'concatenate' not in config['name']:
+            print(layer.name)
+            print("Weights Shape: ", layer.get_weights()[0].shape)  # , '\n', layer.get_weights()[0])
+            print("Bias Shape: ", layer.get_weights()[1].shape)  # , '\n', layer.get_weights()[1], '\n')
 
-        y_pred = finalModel.predict(test_data)
-        y_pred = Splitting_Values(y_pred)
-        y_test = Splitting_Values(test_label)
+    tmp_weight = {}
+    for layer in finalModel.layers:
+        config = layer.get_config()
+        # if 'input' not in config['name'] and 'concatenate' not in config['name']:
+        if 'Molecule_' in config['name']:
+            task_name = config['name']
+            task_name = layer.name
 
-        # print(f'y_pred = {y_pred[:5]}')
-        # print(f'y_test = {y_test[:5]}')
+            # task_name = task_name.split('_')
+            weight_and_bias = []
 
-        predicted_val = []
-        for i in y_pred:
-            if i < 0.75:
-                predicted_val.append(0)
-            else:
-                predicted_val.append(1)
+            weight = layer.get_weights()[0]
+            bias = layer.get_weights()[1]
 
-        Error = [abs(a_i - b_i) for a_i, b_i in zip(y_test, predicted_val)]
-        wrong_pred = Error.count(1)
-        errorRate = wrong_pred / len(y_test)
+            print(weight)
+            print(bias)
 
-        ap = average_precision_score(y_test, y_pred)
+            for w in weight:
+                weight_and_bias.append(w[0])
+            weight_and_bias.append(bias[0])
 
-        if os.path.exists(filepath):
-            os.remove(os.path.join(filepath))
-        trainable_count = 1111
+            if task_name not in tmp_weight:
+                tmp_weight[task_name] = []
+            tmp_weight[task_name].append(weight_and_bias)
 
-        # print(f'Score = {scores}')
-        # print(f'errorRate = {errorRate}')
-        # print(f'ap = {ap}')
-        return scores, trainable_count, errorRate, ap
+    y_pred = finalModel.predict(test_data)
+    y_pred = Splitting_Values(y_pred)
+    y_test = Splitting_Values(test_label)
+
+    # print(f'y_pred = {y_pred[:5]}')
+    # print(f'y_test = {y_test[:5]}')
+
+    predicted_val = []
+    for i in y_pred:
+        if i < 0.75:
+            predicted_val.append(0)
+        else:
+            predicted_val.append(1)
+
+    Error = [abs(a_i - b_i) for a_i, b_i in zip(y_test, predicted_val)]
+    wrong_pred = Error.count(1)
+    errorRate = wrong_pred / len(y_test)
+
+    ap = average_precision_score(y_test, y_pred)
+
+    if os.path.exists(filepath):
+        os.remove(os.path.join(filepath))
+    trainable_count = 1111
+
+    # print(f'Score = {scores}')
+    # print(f'errorRate = {errorRate}')
+    # print(f'ap = {ap}')
+    return scores, trainable_count, errorRate, ap, tmp_weight
 
 
 def prep_task_specific_arch(current_task_group):
@@ -339,13 +390,15 @@ def random_task_grouping(task_Set, min_task_groups):
 
     return task_group
 
+
 if __name__ == "__main__":
     datasetName = 'Chemical'
     DataPath = f'../Dataset/{datasetName.upper()}/'
 
     ResultPath = '../Results/'
     import sys
-    v = int(sys.argv[1])
+
+
 
     ChemicalData = pd.read_csv(f'{DataPath}ChemicalData_All.csv', low_memory=False)
     TASKS = list(ChemicalData['180'].unique())
@@ -362,7 +415,7 @@ if __name__ == "__main__":
     single_results = pd.read_csv(f'{ResultPath}/SingleTaskTraining_{datasetName}.csv')
     # pair_results = pd.read_csv(f'{ResultPath}/new_result/Pairwise/{datasetName}_Results_from_Pairwise_Training_ALL.csv')
     pair_results = pd.read_csv(f'{ResultPath}/{datasetName}_Results_from_Pairwise_Training_ALL.csv')
-    # print(pair_results.columns)
+    print(pair_results.columns)
 
     for Selected_Task in TASKS:
         task_data = task_info[task_info.Molecule == Selected_Task].reset_index()
@@ -392,17 +445,17 @@ if __name__ == "__main__":
             pair_res = pair_results[(pair_results.Task_1 == task2) & (pair_results.Task_2 == task1)].reset_index()
 
         if task1 == pair_res.Task_1[0]:
-            Pairwise_res_dict_indiv.update({p: {f'molecule_{task1}':pair_res.Individual_loss_Task_1[0],
-                                                f'molecule_{task2}':pair_res.Individual_loss_Task_2[0]}})
+            Pairwise_res_dict_indiv.update({p: {f'molecule_{task1}': pair_res.Individual_loss_Task_1[0],
+                                                f'molecule_{task2}': pair_res.Individual_loss_Task_2[0]}})
         else:
-            Pairwise_res_dict_indiv.update({p: {f'molecule_{task1}':pair_res.Individual_loss_Task_2[0],
-                                                f'molecule_{task2}':pair_res.Individual_loss_Task_1[0]}})
+            Pairwise_res_dict_indiv.update({p: {f'molecule_{task1}': pair_res.Individual_loss_Task_2[0],
+                                                f'molecule_{task2}': pair_res.Individual_loss_Task_1[0]}})
         Pairwise_res_dict.update({p: pair_res.Total_Loss[0]})
         PTL_error.update({p: 1 - pair_res.Avg_Accuracy[0]})
-        avg_ap = (pair_res.Individual_AP_task1[0]+pair_res.Individual_AP_task2[0])/2
+        avg_ap = (pair_res.Individual_AP_task1[0] + pair_res.Individual_AP_task2[0]) / 2
         PTL_AP.update({p: avg_ap})
 
-    print(len(Single_res_dict), len(Pairwise_res_dict),len(STL_error), len(STL_AP), len(PTL_error), len(PTL_AP))
+    print(len(Single_res_dict), len(Pairwise_res_dict), len(STL_error), len(STL_AP), len(PTL_error), len(PTL_AP))
 
     previously_trained = pd.read_csv(f'{datasetName}_previously_trained_groups.csv')
     previously_trained_groups = previously_trained['previously_trained_groups'].tolist()
@@ -416,7 +469,9 @@ if __name__ == "__main__":
     number_of_epoch = 400
     min_task_groups = 5
     num_folds = 10
-    initial_shared_architecture = {'adaptive_FF_neurons': 5, 'shared_FF_Layers': 1, 'shared_FF_Neurons': [6],
+    # initial_shared_architecture = {'adaptive_FF_neurons': 5, 'shared_FF_Layers': 1, 'shared_FF_Neurons': [6],
+    #                                'learning_rate': 0.00029055748415145487}
+    initial_shared_architecture = {'adaptive_FF_neurons': 5, 'shared_FF_Layers': 2, 'shared_FF_Neurons': [10,6],
                                    'learning_rate': 0.00029055748415145487}
 
     # gpus = tf.config.list_physical_devices('GPU')
@@ -432,11 +487,11 @@ if __name__ == "__main__":
     Individual_AP = []
     Number_of_Groups = []
     Individual_Task_Score = []
-    run = 2
+    run = 1
 
-    partition_data = pd.read_csv(f'{datasetName}_Random_Task_Groups.csv')
-    TASK_Group = list(partition_data.Task_Groups)
-    # TASK_Group = [{0:TASKS}]
+    # partition_data = pd.read_csv(f'{datasetName}_Random_Task_Groups.csv')
+    # TASK_Group = list(partition_data.Task_Groups)
+    TASK_Group = [{0: TASKS}]
 
     Prev_Groups = {}
     # temp_res = pd.read_csv(
@@ -467,10 +522,10 @@ if __name__ == "__main__":
     #
     # print(len(TASK_Group), len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score),len(Individual_Error_Rate), len(Individual_AP))
     # v = 600
-    for count in range(v,v+250):
+    for count in range(len(TASK_Group)):
         print(f'Initial Training for {datasetName}-partition {count}, {TASK_Group[count]}')
         task_group = TASK_Group[count]
-        task_group = ast.literal_eval(task_group)
+        # task_group = ast.literal_eval(task_group)
 
         TASK_Specific_Arch = prep_task_specific_arch(task_group)
         random_seed = random.randint(0, 100)
@@ -517,7 +572,6 @@ if __name__ == "__main__":
 
                     loss, task_scores, avg_error, AP = sort_Res(all_scores, task)
 
-
                 tot_loss += loss
                 group_score[group_no] = loss
                 group_avg_err[group_no] = avg_error
@@ -551,21 +605,7 @@ if __name__ == "__main__":
         # print(Individual_Group_Score)
 
         print(len(TASK_Group), len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score))
-        if len(Total_Loss)%10 == 0:
-            temp_res= pd.DataFrame({'Total_Loss': Total_Loss,
-                                    'Number_of_Groups': Number_of_Groups,
-                                    'Task_group': Task_group,
-                                    'Individual_Task_Score': Individual_Task_Score,
-                                    'Individual_Group_Score': Individual_Group_Score,
-                                    'Individual_Error_Rate': Individual_Error_Rate,
-                                    'Individual_AP': Individual_AP})
-            temp_res.to_csv(f'../Groupwise_Affinity/{datasetName}_Random_Search_{v+len(Total_Loss)}_run_{run}_v_{v}.csv',
-                            index=False)
 
-            if len(Total_Loss) > 10:
-                old_file = f'../Groupwise_Affinity/{datasetName}_Random_Search_{v+len(Total_Loss)-10}_run_{run}_v_{v}.csv'
-                if os.path.exists(old_file):
-                    os.remove(os.path.join(old_file))
 
     print(len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score))
     initial_results = pd.DataFrame({'Total_Loss': Total_Loss,
@@ -575,6 +615,7 @@ if __name__ == "__main__":
                                     'Individual_Group_Score': Individual_Group_Score,
                                     'Individual_Error_Rate': Individual_Error_Rate,
                                     'Individual_AP': Individual_AP})
-    initial_results.to_csv(f'{ResultPath}/{datasetName}_Random_Search_{len(Total_Loss)}_run_{run}_v_{v}.csv',
+
+    initial_results.to_csv(f'{ResultPath}/{datasetName}_SimpleMTL.csv',
                            index=False)
 

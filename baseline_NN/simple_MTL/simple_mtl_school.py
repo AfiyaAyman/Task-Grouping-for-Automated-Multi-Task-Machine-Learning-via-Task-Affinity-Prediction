@@ -73,7 +73,7 @@ def readData(TASKS):
         # csv = (f"{DataPath}DATA/{sch_id}_School_Data_for_MTL.csv")
         csv = (f"{DataPath}{sch_id}_School_Data.csv")
         school_data = pd.read_csv(csv, low_memory=False)
-        # print(f'sch_id = {sch_id}, school_data = {school_data.shape}')
+        print(f'sch_id = {sch_id}, school_data = {school_data.shape}')
 
         school_data = school_data[[
             '1985', '1986', '1987',
@@ -122,7 +122,7 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
         train_set_size = math.floor(max_size*(1-num_folds/100))
         test_set_size = math.ceil(max_size*(num_folds/100))
 
-    # print(f'train_set_size = {train_set_size}, test_set_size = {test_set_size}')
+    print(f'train_set_size = {train_set_size}, test_set_size = {test_set_size}')
     # max_size = max(training_sample_size)
 
     for f in range(num_folds):
@@ -144,24 +144,23 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
             y_train = Sample_Label[train]
             y_test = Sample_Label[test]
 
+            y_train = SplitLabels(y_train)
+            y_test = SplitLabels(y_test)
 
             samples_to_be_repeated = train_set_size - len(X_train)
-            # print(f'samples_to_be_repeated = {samples_to_be_repeated}')
+            print(f'sch_id = {sch_id}, X_train, X_test = {len(X_train),len(X_test)}, samples_to_be_repeated = {samples_to_be_repeated}')
             if samples_to_be_repeated > 0:
                 random_indices = np.random.choice(X_train.shape[0], samples_to_be_repeated)
                 X_train = np.concatenate((X_train, X_train[random_indices]), axis=0)
                 y_train = np.concatenate((y_train, y_train[random_indices]), axis=0)
 
             samples_to_be_repeated = test_set_size - len(X_test)
-            # print(f'samples_to_be_repeated = {samples_to_be_repeated}')
             if samples_to_be_repeated > 0:
                 random_indices = np.random.choice(X_test.shape[0], samples_to_be_repeated)
                 X_test = np.concatenate((X_test, X_test[random_indices]), axis=0)
                 y_test = np.concatenate((y_test, y_test[random_indices]), axis=0)
+            print(f'fold = {fold} sch_id = {sch_id}, X_train = {X_train.shape}, X_test = {X_test.shape}, y_train = {y_train.shape}, y_test = {y_test.shape}')
 
-            # print(f'X_train = {X_train.shape}, X_test = {X_test.shape}, y_train = {y_train.shape}, y_test = {y_test.shape}')
-            y_train = SplitLabels(y_train)
-            y_test = SplitLabels(y_test)
 
             data_param_dict_for_specific_task[fold][f'School_{sch_id}_fold_{fold}_X_train'] = X_train
             data_param_dict_for_specific_task[fold][f'School_{sch_id}_fold_{fold}_X_test'] = X_test
@@ -180,16 +179,27 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
 
             fold += 1
 
-    number_of_models = 5
+    number_of_models = 10
     current_idx = random.sample(range(len(ALL_FOLDS)), number_of_models)
     args = [ALL_FOLDS[index] for index in sorted(current_idx)]
     return args
 
 def sort_Results(all_scores,task):
     scores = []
-    for i in range(len(all_scores)):
+    for i in range(0,len(all_scores)):
         scores.append(all_scores[i][0])
     # print(f'scores = {scores}')
+
+    weight_dict = {}
+    for i in range(0,len(all_scores)):
+        for task_name, weight in all_scores[i][2].items():
+            if task_name not in weight_dict.keys():
+                weight_dict[task_name] = []
+            weight_dict[task_name].append(weight)
+
+    file = open("../weight_dict_School.txt", "w")
+    file.write("weight_dict = " + repr(weight_dict) + "\n")
+    file.close()
 
     score_param_per_task_group_per_fold = {}
     if len(task) < 2:
@@ -301,7 +311,7 @@ def final_model(task_hyperparameters, shared_hyperparameters, task_group_list, d
     finalModel = Model(inputs=input_layers, outputs=output_layers)
 
 
-    # print(finalModel.summary())
+    print(finalModel.summary())
     # tf.keras.utils.plot_model(finalModel, f"MTL_School_{group_no}.png", show_shapes=True)
     # exit(0)
 
@@ -312,7 +322,7 @@ def final_model(task_hyperparameters, shared_hyperparameters, task_group_list, d
     opt = tf.keras.optimizers.legacy.Adam(learning_rate=shared_hyperparameters['learning_rate'])
     finalModel.compile(optimizer=opt, loss='mse')
 
-    checkpoint = ModelCheckpoint(filepath, verbose=0, monitor='val_loss', save_best_only=True, mode='auto')
+    checkpoint = ModelCheckpoint(filepath, verbose=2, monitor='val_loss', save_best_only=True, mode='auto')
     number_of_epoch = 400
     if len(task_group_list)>10:
         batch_size = 128
@@ -335,11 +345,32 @@ def final_model(task_hyperparameters, shared_hyperparameters, task_group_list, d
 
     finalModel = tf.keras.models.load_model(filepath)
     scores = finalModel.evaluate(test_data, test_label, verbose=0)
+    print("Weights and biases of the layers after training the model: \n")
+    tmp_weight = {}
+    for layer in finalModel.layers:
+        config = layer.get_config()
+        print(f"config['name'] = {config['name']}")
+
+        if f'ExamScore_' in config['name']:
+            task_name = config['name']
+
+            weight = layer.get_weights()[0]
+            bias = layer.get_weights()[1]
+            # print(f'task_name = {task_name}, weights = {np.shape(weight)}, bias = {np.shape(bias)}, weight = {weight}, bias = {bias}')
+
+            weight_and_bias = []
+            for w in weight:
+                weight_and_bias.append(w[0])
+            weight_and_bias.append(bias[0])
+
+            if task_name not in tmp_weight:
+                tmp_weight[task_name] = weight_and_bias
+            # tmp_weight[task_name].append(weight_and_bias)
 
     if os.path.exists(filepath):
         os.remove(os.path.join(filepath))
     # print(f'done')
-    return scores, 999
+    return scores, 999, tmp_weight
 
 
 def random_task_grouping(task_Set, min_task_groups):
@@ -448,11 +479,12 @@ def mtls_for_clusters():
                            index=False)
 
 if __name__ == '__main__':
-    v = sys.argv[1]
+    # v = sys.argv[1]
+    v = 1000
     num_folds = 10
     # initial_shared_architecture = {'adaptive_FF_neurons': 4, 'shared_FF_Layers': 1, 'shared_FF_Neurons': [10],
                                    # 'learning_rate': 0.00779959}
-    initial_shared_architecture = {'adaptive_FF_neurons': 4, 'shared_FF_Layers': 1, 'shared_FF_Neurons': [10],
+    initial_shared_architecture = {'adaptive_FF_neurons': 4, 'shared_FF_Layers': 3, 'shared_FF_Neurons': [20,10,5],
                                  'learning_rate': 0.033806674289462206,}
 
     '''Global Files and Data for Task-Grouping Predictor'''
@@ -519,20 +551,16 @@ if __name__ == '__main__':
     Individual_Group_Score = []
     Individual_Task_Score = []
     Number_of_Groups = []
-    run = 2
+    run = 1
 
-    partition_data = pd.read_csv(f'{datasetName}_Random_Task_Groups_New.csv')
-    # partition_data = pd.read_csv(f'{datasetName}_initial_groups_for_predictor_MTL.csv')
-    TASK_Group = list(partition_data.Task_Groups)
-    # TASK_Group = [{0:TASKS}]
+    TASK_Group = [{0:TASKS}]
     print(len(TASK_Group))
 
     Prev_Groups = {}
-    v = int(v)
-    for count in range(v,v+100):
+    for count in range(len(TASK_Group)):
         print(f'Initial Training for {datasetName}-partition {count}')
         task_group = TASK_Group[count]
-        task_group = ast.literal_eval(task_group)
+        # task_group = ast.literal_eval(task_group)
         print(f'task_group = {task_group}')
 
         TASK_Specific_Arch = prep_task_specific_arch(task_group)
@@ -597,23 +625,7 @@ if __name__ == '__main__':
         print(
             f'len(Total_Loss) = {len(Total_Loss)}, len(Task_group) = {len(Task_group)}, len(Individual_Group_Score) = {len(Individual_Group_Score)}, len(Individual_Task_Score) = {len(Individual_Task_Score)}')
 
-        #print(Individual_Group_Score)
-        # print(f'tot_loss = {tot_loss}')
-        if len(Total_Loss)%5 == 0:
-            temp_res= pd.DataFrame({'Total_Loss': Total_Loss,
-                                    'Number_of_Groups': Number_of_Groups,
-                                    'Task_group': Task_group,
-                                    'Individual_Group_Score': Individual_Group_Score,
-                                    'Individual_Task_Score': Individual_Task_Score,
-                                    # 'Individual_Error_Rate': Individual_Error_Rate,
-                                    # 'Individual_AP': Individual_AP
-                                    })
-            temp_res.to_csv(f'../Groupwise_Affinity/{datasetName}_Random_Search_{v+len(Total_Loss)}_MTL_run_{run}_v_{v}.csv', index=False)
 
-            if len(Total_Loss)>5:
-                old_file = f'../Groupwise_Affinity/{datasetName}_Random_Search_{v+len(Total_Loss)-5}_MTL_run_{run}_v_{v}.csv'
-                if os.path.exists(old_file):
-                    os.remove(os.path.join(old_file))
 
     print(len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score))
     initial_results = pd.DataFrame({'Total_Loss': Total_Loss,
@@ -621,7 +633,6 @@ if __name__ == '__main__':
                                     'Task_group': Task_group,
                                     'Individual_Group_Score': Individual_Group_Score,
                                     'Individual_Task_Score': Individual_Task_Score})
-    initial_results.to_csv(f'{ResultPath}/{datasetName}_Random_Search_{len(Total_Loss)}_MTL_run_{run}_v_{v}.csv',
+
+    initial_results.to_csv(f'{ResultPath}/{datasetName}_SimpleMTL.csv',
                            index=False)
-    # initial_results.to_csv(f'{ResultPath}/{datasetName}_SimpleMTL.csv',
-    #                        index=False)

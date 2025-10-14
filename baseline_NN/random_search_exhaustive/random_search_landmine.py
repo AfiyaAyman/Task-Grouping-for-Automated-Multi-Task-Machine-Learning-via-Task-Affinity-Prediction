@@ -12,14 +12,15 @@ from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from tensorflow.keras.layers import Input, Dense
 from tensorflow.keras import Model, backend
 import ast
+import math
 
 from sklearn.model_selection import KFold
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
+import sys
 USE_GPU = True
 if USE_GPU:
-    device_idx = 0
+    device_idx = int(sys.argv[2])
     gpus = tf.config.list_physical_devices('GPU')
     gpu_device = gpus[device_idx]
     core_config = tf.config.experimental.set_visible_devices(gpu_device, 'GPU')
@@ -29,10 +30,33 @@ else:
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 
+
+import subprocess
+from subprocess import PIPE
+
+
+class NoDaemonProcess(mp.Process):
+    # make 'daemon' attribute always return False
+    def _get_daemon(self):
+        return False
+
+    def _set_daemon(self, value):
+        pass
+
+    daemon = property(_get_daemon, _set_daemon)
+
+
+# sub-class multiprocessing.pool.Pool instead of multiprocessing.Pool
+# because the latter is only a wrapper function, not a proper class.
+class MyPool(mp.pool.Pool):
+    Process = NoDaemonProcess
+
+
 def readData(landmine_list):
     data_param_dictionary = {}
     for landmine in landmine_list:
-        csv = (f"{DataPath}DATA/LandmineData_{landmine}_for_MTL.csv")
+        # csv = (f"{DataPath}DATA/LandmineData_{landmine}_for_MTL.csv")
+        csv = (f"{DataPath}LandmineData_{landmine}.csv")
         df = pd.read_csv(csv, low_memory=False)
 
 
@@ -80,6 +104,10 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
     data_param_dictionary, Number_of_Features = readData(landmine_list)
 
     data_param_dict_for_specific_task = {}
+    if datasetName == 'Landmine':
+        max_size = 690
+        train_set_size = math.floor(max_size * (1 - num_folds / 100))
+        test_set_size = math.ceil(max_size * (num_folds / 100))
 
     for landmine in landmine_list:
 
@@ -96,6 +124,21 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
             X_test = Sample_Inputs[test]
             y_train = Sample_Label[train]
             y_test = Sample_Label[test]
+
+            samples_to_be_repeated = train_set_size - len(X_train)
+            # print(f'samples_to_be_repeated = {samples_to_be_repeated}')
+            if samples_to_be_repeated > 0:
+                random_indices = np.random.choice(X_train.shape[0], samples_to_be_repeated)
+                X_train = np.concatenate((X_train, X_train[random_indices]), axis=0)
+                y_train = np.concatenate((y_train, y_train[random_indices]), axis=0)
+
+            samples_to_be_repeated = test_set_size - len(X_test)
+            # print(f'samples_to_be_repeated = {samples_to_be_repeated}')
+            if samples_to_be_repeated > 0:
+                random_indices = np.random.choice(X_test.shape[0], samples_to_be_repeated)
+                X_test = np.concatenate((X_test, X_test[random_indices]), axis=0)
+                y_test = np.concatenate((y_test, y_test[random_indices]), axis=0)
+
 
             y_train = SplitLabels(y_train)
             y_test = SplitLabels(y_test)
@@ -139,8 +182,7 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
     scores = []
     for c in range(len(all_scores)):
         scores.append(all_scores[c][0])
-    # print(f'scores = {scores}')
-    # print(len(molecule_list))
+
     for score in scores:
         idx = 1
         for landmine in landmine_list:
@@ -168,6 +210,10 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
     for t, loss_val in score_param_per_task_group_per_fold.items():
         total_loss_per_task_group_per_fold += np.mean(loss_val)
 
+    task_specific_scores = {}
+    for key in score_param_per_task_group_per_fold.keys():
+        task_specific_scores.update({key: np.mean(score_param_per_task_group_per_fold[key])})
+
     # print(f'error_param_per_task_group_per_fold = {error_param_per_task_group_per_fold}')
     # print(f'ap = {ap}')
     # print(f'ap = {ap}')
@@ -179,7 +225,7 @@ def kFold_validation(current_task_specific_architecture, current_shared_architec
     print(
         f'total_loss_per_task_group_per_fold = {total_loss_per_task_group_per_fold}\tAUC = {AUC}')
 
-    return total_loss_per_task_group_per_fold, AUC
+    return total_loss_per_task_group_per_fold, task_specific_scores, AUC
 
 
 
@@ -195,7 +241,9 @@ def postprocessing_feedforward(hyperparameters, last_hidden):
 def final_model(task_hyperparameters, shared_hyperparameters, landmine_list, data_param_dict_for_specific_task,
                 Number_of_Features, fold, group_no):
 
-    filepath = f'SavedModels/RS_Landmine_Group_{group_no}_{fold}.h5'
+
+    #filepath = f'SavedModels/{ClusterType}_Landmine_Group_{group_no}_{fold}.h5'
+    filepath = f'SavedModels/V_{V}_RS_{datasetName}_Group_{group_no}_{fold}.h5'
     MTL_model_param = {}
     input_layers = []
 
@@ -288,12 +336,25 @@ def final_model(task_hyperparameters, shared_hyperparameters, landmine_list, dat
     finalModel = tf.keras.models.load_model(filepath)
     scores = finalModel.evaluate(tuple(test_data), tuple(test_label), verbose=0)
 
-    y_pred = finalModel.predict(test_data)
+    y_pred = finalModel.predict(test_data, verbose=0)
     y_pred = Splitting_Values(y_pred)
     y_test = Splitting_Values(test_label)
 
-    print(f'y_pred = {y_pred[:5]}')
-    print(f'y_test = {y_test[:5]}')
+    # print(f'y_pred = {y_pred[:5]}')
+    # print(f'y_test = {y_test[:5]}')
+
+    # predicted_val = []
+    # for i in y_pred:
+    #     if i < 0.75:
+    #         predicted_val.append(0)
+    #     else:
+    #         predicted_val.append(1)
+    #
+    # Error = [abs(a_i - b_i) for a_i, b_i in zip(y_test, predicted_val)]
+    # wrong_pred = Error.count(1)
+    # errorRate = wrong_pred / len(y_test)
+
+    # ap = average_precision_score(y_test, y_pred)
 
 
     auc = 0
@@ -303,8 +364,8 @@ def final_model(task_hyperparameters, shared_hyperparameters, landmine_list, dat
         pass
     if os.path.exists(filepath):
         os.remove(os.path.join(filepath))
-    from keras.utils.layer_utils import count_params
-    trainable_count = count_params(finalModel.trainable_weights)
+    trainable_count = 1111
+    # return scores, (auc1, auc2), trainable_count
     return scores, trainable_count, auc
 
 
@@ -324,12 +385,30 @@ def prep_task_specific_arch(current_task_group):
     return TASK_Specific_Arch
 
 
+def random_task_grouping(task_Set, min_task_groups):
+    task_group = {}
+    total_dataset = len(task_Set)
+    group = 0
+    while total_dataset > 0 and min_task_groups > 0:
+        team = random.sample(task_Set, int(total_dataset / min_task_groups))
+        task_group.update({group: team})
+        group += 1
+        for x in team:
+            task_Set.remove(x)
+        total_dataset -= int(total_dataset / min_task_groups)
+        min_task_groups -= 1
+
+    return task_group
+
 
 if __name__ == "__main__":
-    datasetName = 'Landmine'
-    DataPath = f'../../Dataset/{datasetName.upper()}/'
+    import sys
 
-    ResultPath = '../../Results'
+    V = int(sys.argv[1])
+    datasetName = 'Landmine'
+    DataPath = f'../Dataset/{datasetName.upper()}/'
+
+    ResultPath = '../Results'
 
     task_len = {}
     variance_dict = {}
@@ -340,8 +419,8 @@ if __name__ == "__main__":
     loss_dict = {}
     task_info = pd.read_csv(f'{DataPath}Task_Information_{datasetName}.csv')
     task_distance_info = pd.read_csv(f'{DataPath}Task_Distance_{datasetName}.csv')
-    single_results = pd.read_csv(f'{ResultPath}STL/STL_{datasetName}_NN.csv')
-    pair_results = pd.read_csv(f'{ResultPath}Pairwise/NN/{datasetName}_Results_from_Pairwise_Training_ALL_NN.csv')
+    single_results = pd.read_csv(f'{ResultPath}/SingleTaskTraining_{datasetName}.csv')
+    pair_results = pd.read_csv(f'{ResultPath}/{datasetName}_Results_from_Pairwise_Training_ALL_NN.csv')
 
     TASKS = [i for i in range(0, 29)]
     print(len(TASKS))
@@ -356,21 +435,35 @@ if __name__ == "__main__":
         STL_AUC.update({Selected_Task: single_res.AUC[0]})
 
     Pairwise_res_dict = {}
+    Pairwise_res_dict_indiv = {}
     PTL_AUC = {}
     Task1 = list(pair_results.Task_1)
     Task2 = list(pair_results.Task_2)
     Pairs = [(Task1[i], Task2[i]) for i in range(len(Task1))]
+    print(len(Pairs))
 
     for p in Pairs:
         task1 = p[0]
         task2 = p[1]
         pair_res = pair_results[(pair_results.Task_1 == task1) & (pair_results.Task_2 == task2)].reset_index()
+
+        if task1 == pair_res.Task_1[0]:
+            Pairwise_res_dict_indiv.update({p: {f'landmine_{task1}': pair_res.Individual_loss_Task_1[0],
+                                                f'landmine_{task2}': pair_res.Individual_loss_Task_2[0]}})
+        else:
+            Pairwise_res_dict_indiv.update({p: {f'landmine_{task1}': pair_res.Individual_loss_Task_2[0],
+                                                f'landmine_{task2}': pair_res.Individual_loss_Task_1[0]}})
+
         Pairwise_res_dict.update({p: pair_res.Total_Loss[0]})
         avg_auc = (pair_res.Individual_Auc_task1[0] + pair_res.Individual_Auc_task2[0]) / 2
         PTL_AUC.update({p: avg_auc})
 
     print(len(Single_res_dict), len(Pairwise_res_dict), len(PTL_AUC))
 
+    previously_trained = pd.read_csv(f'{datasetName}_previously_trained_groups.csv')
+    previously_trained_groups = previously_trained['previously_trained_groups'].tolist()
+    previously_trained_groups_loss = previously_trained['previously_trained_groups_loss'].tolist()
+    prev_Average_AUC = previously_trained['prev_Average_AUC'].tolist()
 
     number_of_epoch = 400
     num_folds = 10
@@ -384,20 +477,33 @@ if __name__ == "__main__":
     switch_architecture = ['ACCEPT', 'REJECT']
 
     '''Initial Training Functions'''
+    # gpus = tf.config.list_physical_devices('GPU')
+    # gpu_device = gpus[0]
+    # core_config = tf.config.experimental.set_visible_devices(gpu_device, 'GPU')
+    # tf.config.experimental.set_memory_growth(gpu_device, True)
+    # tf.compat.v1.keras.backend.set_session(tf.compat.v1.Session(config=core_config))
+    # Type = 'WeightMatrix'
+    # # ClusterType = 'Hierarchical'
+    # ClusterType = 'KMeans'
+    # mtls_for_clusters()
+    # rs_for_partitions()
 
     Task_group = []
     Total_Loss = []
     Individual_Group_Score = []
     Number_of_Groups = []
     Individual_AUC = []
+    Individual_Task_Score = []
 
-    run = 1
+    run = 2
 
-    partition_data = pd.read_csv(f'{datasetName}_OnlyGroups_URS.csv')
-    TASK_Group = list(partition_data.Task_group)
+    partition_data = pd.read_csv(f'{datasetName}_Random_Task_Groups_New.csv')
+    TASK_Group = list(partition_data.Task_Groups)
 
     Prev_Groups = {}
-    for count in range(len(TASK_Group)):
+    # TASK_Group = [{0: TASKS}]
+    for count in range(V, V+200):
+    # for count in range(len(TASK_Group)):
         print(f'Initial Training for {datasetName}-partition {count}')
         # task_Set = copy.deepcopy(TASKS)
 
@@ -410,6 +516,7 @@ if __name__ == "__main__":
 
         group_score = {}
         group_avg_AUC = {}
+        tmp_task_score = []
         tot_loss = 0
         for group_no, task in task_group.items():
             group_score.update({group_no: 0})
@@ -419,20 +526,24 @@ if __name__ == "__main__":
                 if len(task) == 1:
                     loss = Single_res_dict[task[0]]
                     AUC = STL_AUC[task[0]]
+                    task_scores = {f'landmine_{task[0]}': Single_res_dict[task[0]]}
+
                 elif len(task) == 2:
                     loss = Pairwise_res_dict[grouping_sorted]
                     AUC = PTL_AUC[grouping_sorted]
+                    task_scores = copy.deepcopy(Pairwise_res_dict_indiv[grouping_sorted])
 
                 else:
                     tmp = (TASK_Specific_Arch[group_no], initial_shared_architecture, task, group_no, random_seed)
-                    loss, AUC = kFold_validation(*tmp)
+                    loss, task_scores, AUC = kFold_validation(*tmp)
                 tot_loss += loss
                 group_score[group_no] = loss
                 group_avg_AUC[group_no] = AUC
-                Prev_Groups[grouping_sorted] = (loss, AUC)
+                Prev_Groups[grouping_sorted] = (loss, AUC,copy.deepcopy(task_scores))
+                tmp_task_score.append(copy.deepcopy(task_scores))
 
             else:
-                loss, AUC = Prev_Groups[grouping_sorted]
+                loss, AUC, task_scores = Prev_Groups[grouping_sorted]
                 if group_no not in group_score.keys():
                     group_score.update({group_no: loss})
                     group_avg_AUC.update({group_no: AUC})
@@ -442,26 +553,32 @@ if __name__ == "__main__":
                     group_avg_AUC[group_no] = AUC
 
                 tot_loss += loss
+                tmp_task_score.append(copy.deepcopy(task_scores))
 
+            print(f'group_no = {group_no}\tloss = {loss}, task_scores = {task_scores}')
+
+        print(f'tot_loss = {tot_loss}')
         Task_group.append(task_group)
         Number_of_Groups.append(len(task_group))
         Total_Loss.append(tot_loss)
         Individual_Group_Score.append(group_score.copy())
         Individual_AUC.append(group_avg_AUC.copy())
+        Individual_Task_Score.append(tmp_task_score.copy())
         # print(Individual_Group_Score)
-        if np.sum(Number_of_Groups)>=1000:
-            break
-        print(len(TASK_Group), len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score))
-        if len(Total_Loss) % 10 == 0:
+        print(len(TASK_Group), len(Total_Loss), len(Number_of_Groups), len(Task_group), len(Individual_Group_Score), len(Individual_AUC), len(Individual_Task_Score))
+        cut_off = 2
+        if len(Total_Loss) % cut_off == 0:
             temp_res = pd.DataFrame({'Total_Loss': Total_Loss,
                                      'Number_of_Groups': Number_of_Groups,
+                                        'Task_group': Task_group,
+                                        'Individual_Task_Score': Individual_Task_Score,
                                      'Individual_Group_Score': Individual_Group_Score,
                                      'Individual_AUC': Individual_AUC})
-            temp_res.to_csv(f'../Groupwise_Affinity/{datasetName}_Random_Search_{len(Total_Loss)}_run_{run}.csv',
+            temp_res.to_csv(f'../Groupwise_Affinity/{datasetName}_Random_Search_{V+len(Total_Loss)}_run_{run}_v_{V}.csv',
                             index=False)
 
-            if len(Total_Loss) > 10:
-                old_file = f'../Groupwise_Affinity/{datasetName}_Random_Search_{len(Total_Loss)-10}_run_{run}.csv'
+            if len(Total_Loss) > cut_off:
+                old_file = f'../Groupwise_Affinity/{datasetName}_Random_Search_{V+len(Total_Loss)-cut_off}_run_{run}_v_{V}.csv'
                 if os.path.exists(old_file):
                     os.remove(os.path.join(old_file))
 
@@ -469,7 +586,10 @@ if __name__ == "__main__":
     initial_results = pd.DataFrame({'Total_Loss': Total_Loss,
                                     'Number_of_Groups': Number_of_Groups,
                                     'Task_group': Task_group,
+                                    'Individual_Task_Score': Individual_Task_Score,
                                     'Individual_Group_Score': Individual_Group_Score,
                                     'Individual_AUC': Individual_AUC})
-    initial_results.to_csv(f'{ResultPath}/{datasetName}_Random_Search_{len(Total_Loss)}_run_{run}.csv',
+    initial_results.to_csv(f'{ResultPath}/{datasetName}_Random_Search_{len(Total_Loss)}_run_{run}_v_{V}.csv',
                            index=False)
+    # initial_results.to_csv(f'{ResultPath}/{datasetName}_SimpleMTL.csv',
+    #                        index=False)
