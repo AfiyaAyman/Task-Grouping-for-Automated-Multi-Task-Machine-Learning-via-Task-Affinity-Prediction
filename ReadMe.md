@@ -158,3 +158,9 @@ Parkinson_pairwise_MTL.py → Generates results for Pairwise Multi-Task Learning
 
 
 --------------------------------------------------------------------------------------------------
+
+## 📜 Citation
+
+If you use these scripts or data preprocessing methodology, please cite:
+
+Ayman, A., Mukhopadhyay, A., & Laszka, A. (2023). Task Grouping for Automated Multi-Task Machine Learning via Task Affinity Prediction. _arXiv preprint arXiv:2310.16241._
