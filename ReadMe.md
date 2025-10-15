@@ -35,7 +35,7 @@ install requirements in requirements.txt
 --------------------------------------------------------------------------------------------------
 grouping_with_affinity_predictor: Contains scripts for Task-Affinity Predictor (Quick_Reject_Class.py), Randomized Search with Quick Reject Implementation (*_QR.py)
 
-**Dataset**: Contains all benchmarks data and some datafiles for all the scripts to run without error in separate subdirectories
+**Dataset**: Contains all benchmarks data and some datafiles for all the scripts to run without error in separate subdirectories--skipping here due to data-size. Read paper on details.
 
 **DataPrep**: Contains separate scripts to prepare data for baseline approach and Randomized Search with Quick Reject
 
